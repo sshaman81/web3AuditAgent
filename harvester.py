@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-harvest_context.py — Web3 Codebase Harvester for LLM Auditing / Bug Bounty
-Concatenates protocol files into a single LLM-ready context file.
-Supports Solidity (EVM), Rust (Solana / CosmWasm / Substrate / Anchor), and more.
-
-Usage:
-  python harvest_context.py ./my-evm-protocol -o context.txt
-  python harvest_context.py ./my-anchor-program --rust
-  python harvest_context.py ./my-protocol --auto --bug-bounty
+harvest_context.py — Web3 codebase harvester and utility helpers for LLM auditing.
+Concatenates protocol files into an LLM-ready context file and exposes helpers such as
+fetch_contract_source with retry-aware rate-limit handling.
 """
 
-import os
-import sys
 import argparse
-from pathlib import Path
+import os
+import re
+import sys
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+from typing import Any, Callable, Optional, TypeVar
+
+import requests
+from requests.exceptions import RequestException
 
 # ── ANSI colours (auto-disabled if not a TTY) ────────────────────────────────
 USE_COLOR = sys.stdout.isatty()
@@ -63,6 +63,16 @@ OPTIONAL_EXTENSIONS: dict[str, set[str]] = {
     "ts":     {".ts", ".js"},
     "rust":   RUST_EXTENSIONS,                       # ← new flag
 }
+
+ETHERSCAN_API_URLS: dict[str, str] = {
+    "mainnet": "https://api.etherscan.io/api",
+    "goerli": "https://api-goerli.etherscan.io/api",
+}
+
+T = TypeVar("T")
+
+class RateLimitError(RuntimeError):
+    pass
 
 # Rough tokens-per-char ratio for GPT/Claude models
 CHARS_PER_TOKEN = 3.8
@@ -153,6 +163,23 @@ class HarvestStats:
     @property
     def total_lines(self) -> int:
         return sum(f.line_count for f in self.files)
+
+
+def _retry_with_backoff(
+    func: Callable[[], T],
+    retries: int = 3,
+    base_delay: float = 1.0,
+) -> T:
+    for attempt in range(1, retries + 1):
+        try:
+            return func()
+        except (RequestException, RateLimitError) as exc:
+            if attempt == retries:
+                raise
+            delay = min(60, base_delay * 2 ** (attempt - 1))
+            time.sleep(delay)
+
+
 
 
 # ── Project-type auto-detection ───────────────────────────────────────────────
@@ -400,6 +427,50 @@ def print_summary(stats: HarvestStats, output_path: Path) -> None:
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+def fetch_contract_source(address: str, chain: str = "mainnet") -> dict[str, Any]:
+    """
+    Fetch a verified contract source from Etherscan and provide metadata.
+    """
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", address):
+        raise ValueError("Address must be a 0x-prefixed 40-hex character string.")
+    api_url = ETHERSCAN_API_URLS.get(chain)
+    if api_url is None:
+        raise ValueError(f"Unsupported chain '{chain}'.")
+    api_key = os.getenv("ETHERSCAN_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set ETHERSCAN_API_KEY in the environment before fetching contracts.")
+
+    def _request() -> dict[str, Any]:
+        response = requests.get(
+            api_url,
+            params={
+                "module": "contract",
+                "action": "getsourcecode",
+                "address": address,
+                "apikey": api_key,
+            },
+            timeout=30,
+        )
+        if response.status_code == 429:
+            raise RateLimitError("Etherscan returned HTTP 429.")
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("status") != "1":
+            raise RuntimeError(f"Etherscan responded with error: {payload.get('message')}")
+        items = payload.get("result", [])
+        if not items:
+            raise RuntimeError("Etherscan returned no contract data.")
+        result = items[0]
+        return {
+            "source_code": result.get("SourceCode", ""),
+            "contract_name": result.get("ContractName", ""),
+            "abi": result.get("ABI", ""),
+            "compiler_version": result.get("CompilerVersion", ""),
+        }
+
+    return _retry_with_backoff(_request)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Harvest a Web3 codebase (EVM or Rust) into a single LLM-ready audit/bug-bounty context file.",
