@@ -1,97 +1,136 @@
-# Multi-Agent Smart Contract Audit System
+# web3AuditAgent (Bug Bounty Assistant, Defensive Mode)
 
-This repository scaffolds a LangGraph + LangChain-driven audit pipeline that routes Claude 3.5 models through recon, auditing, exploit generation, and review, and wires Forge Proof-of-Concept execution into the loop.
+LangGraph-based smart contract security assistant optimized for fast bug bounty triage and responsible disclosure workflows.
 
-## Key Components
+## Safety Scope
 
-- `config.py`: Environment-aware settings for each Claude endpoint and execution parameters so you can tweak models/timeout/log limits without touching logic.
-- `state.py`: Typed-state schema (`AuditState`) capturing the raw code, hypothesis history, Forge runs, error logs, and final report.
-- `prompts.py`: System prompts for recon, auditing, and exploit development, explicitly prescribing the structured JSON output needed by the auditor.
-- `schemas.py`: Pydantic models that describe the recon summary, vulnerability hypotheses, and audit report to keep LangGraph outputs structured.
-- `tools.py`: LangChain tool wrapping `forge test` with timeout handling, missing-Forge detection, log truncation, and typed `FoundryResult` telemetry.
-- `main_agent.py`: LangGraph `StateGraph` wiring the recon ? auditor ? exploit ? reviewer nodes, enforcing caching order, deduplicating hypotheses, and handling model/tool errors with retry/backoff logic.
-- `harvester.py`: Legacy context harvester plus the `fetch_contract_source` helper that retrieves verified Solidity code from Etherscan with retry-aware rate-limit handling.
+This project is designed for:
+- Defensive vulnerability discovery
+- Duplicate-checking against bounty platforms
+- Controlled reproducibility testing in local/forked environments
+- Report generation for responsible submission
 
-## Architecture
+It is **not** intended to automate real-world exploitation.
 
-```
-              +----------------+
-              |    Recon       |
-              | (haiku model)  |
-              +--------+-------+
-                       |
-                       v
-              +--------+-------+
-              |    Auditor     |<----------------------------+
-              | (sonnet model) |                             |
-              +--------+-------+                             |
-                       |                                     |
-                       v                                     |
-              +--------+-------+             retry when       |
-              |   Exploit      |<------------ hypothesis      |
-              | (sonnet model) |             limit reached     |
-              +----+---+-------+                             |
-                   |   |                                     |
-                   |   +---------------------------+         |
-                   |                               |         |
-                   v                               v         |
-              +----+---+-------+                  [vulnerable]|
-              |  Reviewer      |<-----------------------------+
-              +----------------+
-```
+## Core Workflow
 
-The conditional routing keeps the exploit node looping until a PoC succeeds or the retry counter hits `MAX_HYPOTHESES`, at which point the auditor spins up a new hypothesis. All Claude calls preserve the prompt order required for Anthropic prompt caching.
+The graph keeps the core pipeline and adds speed gates:
 
-## Prerequisites
+`harvester -> duplicate_guard -> triage -> recon -> auditor -> exploit -> failure_analyzer -> economics -> reviewer`
 
-- Python **3.11+**
-- Foundry (`forge`) installed and available on `PATH`
-- Anthropic API key (set `ANTHROPIC_API_KEY` before running the agents)
+Fast exits:
+- Duplicate found: skip deep run
+- Triage says low value: skip deep run in fast mode
 
-## Setup
+## Key Features
 
-1. Copy the secure template: `cp .env.example .env` (or on Windows `copy .env.example .env`).
-2. Populate `.env` with your keys (`ANTHROPIC_API_KEY`, `ETHERSCAN_API_KEY` if you plan to use `harvester.fetch_contract_source`).
-3. Install dependencies: `pip install -r requirements.txt`.
-4. Run the graph once Forge is configured: `python main_agent.py`.
-5. For regenerating context data, use `python harvester.py <path>` or call `fetch_contract_source` directly for verified contracts.
+- Validated Anthropic model configuration (`claude-3-5-haiku-20241022`, `claude-3-5-sonnet-20241022`, `claude-3-opus-20240229`)
+- Triage-first routing for <10s signal checks
+- Platform duplicate checks for Immunefi, HackenProof, and Cantina
+- Parallel hypothesis testing with LangGraph fan-out
+- Economic viability scoring (`funds_at_risk_usd`, profitability assumptions)
+- Foundry execution with fork modes:
+  - `off`
+  - `mainnet` (Alchemy/Infura/env URL)
+  - `anvil` (local RPC)
+- Optional Tenderly simulation helper
+- Structured report bundle output:
+  - `report.md`
+  - `report.json`
+  - `immunefi.md`
+  - `cantina.md`
+- SQLite caching for analysis/pattern/duplicate fingerprints
 
-## Troubleshooting
+## Project Structure
 
-1. **Missing `forge` binary**: `tools.execute_foundry_poc` raises a `RuntimeError` if Forge is not installed. Install Foundry (`curl -L https://foundry.paradigm.xyz | bash`) and re-open the shell so `forge` is on your `PATH`.
-2. **`ANTHROPIC_API_KEY` not set**: The LangChain Anthropic wrappers and `config.py` will fail fast if `.env` does not provide the key. Ensure `.env` exists and contains `ANTHROPIC_API_KEY=your_key` before running the graph.
-3. **Context overflow errors**: If Claude rejections cite context limits, the error handler trims 20% of `raw_code` and retries. Consider limiting the target contract size, or feed smaller slices from the harvester before running the agents.
+- `main_agent.py`: LangGraph orchestration + routing logic
+- `config.py`: strict settings + validation
+- `tools.py`: Foundry execution, gas parsing, fork URL resolution, Tenderly helper
+- `bounty_platforms.py`: platform clients and duplicate checks
+- `exploit_economics.py`: viability calculations
+- `report_generator.py`: platform-oriented report templates
+- `contest_runner.py`: async batch triage and top-3 selection
+- `cache_manager.py`: SQLite cache layer
+- `state.py`: Pydantic state models + typed graph state
+- `schemas.py`: vulnerability schema with risk/ease fields
+- `prompts.py`: defensive triage/audit/exploit-validation prompts
 
-## Example Output
+## Requirements
 
-```
-# Audit Report
-Started: 2026-02-28T23:52:00Z
-Status: VULNERABLE
+- Python 3.11+
+- Foundry (`forge`) on PATH
+- Anthropic API key
 
-## Recon Summary
-[LLM recon summary text...]
+Install:
 
-## Hypotheses
-- 1. EmergencyPause bypass (critical)
-
-## Forge Runs
-- Hypothesis: EmergencyPause bypass (critical) | Success: True | Exit: 0
-
-## PoC
-```solidity
-contract AgentExploit is Test { ... }
+```bash
+pip install -r requirements.txt
 ```
 
-## Logs
+## Environment Setup
+
+Copy the template:
+
+```bash
+cp .env.example .env
 ```
-STDOUT:
-Forge test output ...
-STDERR:
+
+(or Windows: `copy .env.example .env`)
+
+Important vars:
+- `ANTHROPIC_API_KEY`
+- `RECON_MODEL`, `AUDIT_MODEL`, `EXPLOIT_MODEL`
+- `FAST_MODE`, `MAX_HYPOTHESES`, `MAX_PARALLEL_CONTRACTS`
+- `FORGE_MODE`, `FORGE_FORK_URL`, `ALCHEMY_MAINNET_URL`, `INFURA_MAINNET_URL`, `ANVIL_RPC_URL`
+- `IMMUNEFI_API_KEY`, `HACKENPROOF_API_KEY` (optional depending on endpoint access)
+- `TENDERLY_*` (optional)
+
+## Running
+
+Single run:
+
+```bash
+python main_agent.py
 ```
+
+Programmatic usage:
+
+```python
+from main_agent import build_graph
+from state import build_initial_state, as_graph_state
+
+graph = build_graph()
+state = build_initial_state(raw_code="contract Sample { function run() public {} }", platform_name="immunefi")
+result = graph.invoke(as_graph_state(state))
+print(result.get("report_directory"))
 ```
-```
+
+## Contest Batch Triage
+
+Use `contest_runner.py` utilities to triage many targets in parallel (up to `MAX_PARALLEL_CONTRACTS`) and pick top candidates for deeper analysis.
 
 ## Testing
 
-Run `pytest` to execute the validation suite (`tests/test_tools.py`, `tests/test_schemas.py`, `tests/test_state.py`).
+Run:
+
+```bash
+pytest -q
+```
+
+Current suite includes:
+- schema validation
+- tool execution behavior
+- utility/state checks
+- exploit economics calculations
+
+## Output Artifacts
+
+Reports are saved under:
+
+`./reports/{timestamp}_{contract_name}/`
+
+With:
+- `report.md`
+- `report.json`
+- `immunefi.md`
+- `cantina.md`
