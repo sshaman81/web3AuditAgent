@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class VulnerabilityType(str, Enum):
@@ -10,6 +10,7 @@ class VulnerabilityType(str, Enum):
     access_control = "access_control"
     logic_error = "logic_error"
     oracle_manipulation = "oracle_manipulation"
+    flash_loan = "flash_loan"
     other = "other"
 
 
@@ -27,6 +28,15 @@ class VulnerabilityHypothesis(BaseModel):
     severity: Severity
     affected_functions: List[str]
     suggested_poc_approach: str
+    funds_at_risk_usd: float = Field(default=0.0, ge=0.0)
+    ease_of_exploitation: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("funds_at_risk_usd")
+    @classmethod
+    def validate_funds_at_risk(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("funds_at_risk_usd must be >= 0")
+        return value
 
 
 class AuditReport(BaseModel):
