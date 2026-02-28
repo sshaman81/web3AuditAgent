@@ -29,6 +29,13 @@ from exploit_economics import EconomicInput, LiquiditySource, assess_exploit_eco
 from harvester import fetch_contract_source
 from logger import get_logger, setup_logging
 from prompts import AUDITOR_PROMPT, EXPLOIT_DEV_PROMPT, RECON_PROMPT
+from prompts import (
+    DUPLICATE_GUARD_PROMPT,
+    ECONOMICS_PROMPT,
+    FAILURE_ANALYZER_PROMPT,
+    REVIEWER_PROMPT,
+    TRIAGE_PROMPT,
+)
 from report_generator import generate_report_bundle
 from schemas import Severity, VulnerabilityHypothesis
 from state import (
@@ -69,6 +76,14 @@ TRIAGE_PATTERNS: dict[str, re.Pattern[str]] = {
     "oracle_manipulation": re.compile(r"TWAP|oracle|latestRoundData|getReserves", re.IGNORECASE),
     "access_control": re.compile(r"onlyOwner|Ownable|AccessControl|set[A-Z]\w+", re.IGNORECASE),
 }
+
+
+def _parse_json_response(content: str) -> Any:
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
 
 
 async def parallel_triage_contracts(contract_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -138,7 +153,7 @@ def _semantic_context_update(state: AuditState) -> dict[str, Any]:
 
 
 def _parse_hypothesis_payload(payload: str) -> list[VulnerabilityHypothesis]:
-    data = json.loads(payload)
+    data = _parse_json_response(payload)
     items: list[dict[str, Any]]
     if isinstance(data, dict):
         items = [data]
@@ -146,7 +161,13 @@ def _parse_hypothesis_payload(payload: str) -> list[VulnerabilityHypothesis]:
         items = [item for item in data if isinstance(item, dict)]
     else:
         raise ValueError("Auditor returned non-JSON hypothesis payload")
-    return [VulnerabilityHypothesis.model_validate(item) for item in items]
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        copy = dict(item)
+        if copy.get("funds_at_risk_usd") is None:
+            copy["funds_at_risk_usd"] = 0.0
+        normalized.append(copy)
+    return [VulnerabilityHypothesis.model_validate(item) for item in normalized]
 
 
 def _dedupe_hypotheses(
@@ -156,7 +177,7 @@ def _dedupe_hypotheses(
     accepted: list[VulnerabilityHypothesis] = []
     history_updates: list[str] = []
     for hypothesis in candidate_hypotheses:
-        if hypothesis.severity not in {Severity.high, Severity.critical}:
+        if hypothesis.severity not in {Severity.HIGH, Severity.CRITICAL}:
             continue
         text = f"{hypothesis.title} {hypothesis.description}".strip()
         if any(word_overlap(text, existing) > 0.8 for existing in history + history_updates):
@@ -219,6 +240,29 @@ def duplicate_guard_node(state: AuditGraphState) -> dict[str, Any]:
         cantina_client=cantina_client,
     )
 
+    # Prompt-aligned semantic duplicate check fallback when API checks are inconclusive.
+    if not exists and "incomplete" in reason.lower():
+        messages: list[BaseMessage] = [
+            SystemMessage(content=DUPLICATE_GUARD_PROMPT),
+            HumanMessage(
+                content=(
+                    f"Target contract: {model.contract_address}\n"
+                    f"Known issue summary feed:\n{reason}\n"
+                    "Hypothesis summary: potential unknown issue"
+                )
+            ),
+        ]
+        response = auditor_llm.invoke(messages)
+        try:
+            payload = _parse_json_response(str(response.content))
+            similarity = float(payload.get("similarity_score", 0.0) or 0.0)
+            llm_duplicate = bool(payload.get("is_duplicate", False))
+            llm_reason = str(payload.get("rationale", "LLM duplicate guard decision"))
+            exists = llm_duplicate and similarity > 0.85
+            reason = llm_reason
+        except Exception:
+            pass
+
     if exists:
         cache_manager.set_duplicate_fingerprint(
             fingerprint=fp,
@@ -234,7 +278,26 @@ def duplicate_guard_node(state: AuditGraphState) -> dict[str, Any]:
 
 def triage_node(state: AuditGraphState) -> dict[str, Any]:
     model = _state_from_graph(state)
-    result, reasons = triage_contract_code(_active_code(model))
+    code = _active_code(model)
+    result, reasons = triage_contract_code(code)
+    try:
+        messages: list[BaseMessage] = [
+            SystemMessage(content=TRIAGE_PROMPT),
+            HumanMessage(content=code),
+        ]
+        response = recon_llm.invoke(messages)
+        payload = _parse_json_response(str(response.content))
+        decision = str(payload.get("decision", result)).strip().lower()
+        signals = payload.get("signals", reasons)
+        rationale = str(payload.get("rationale", "")).strip()
+        if decision in {"promising", "skip"}:
+            result = decision
+        if isinstance(signals, list):
+            reasons = [str(item) for item in signals if str(item).strip()]
+        if rationale:
+            reasons = [rationale] + reasons
+    except Exception:
+        pass
     return {
         "triage_result": result,
         "triage_reasons": reasons,
@@ -267,7 +330,8 @@ def recon_node(state: AuditGraphState) -> dict[str, Any]:
             HumanMessage(content=working_code),
         ]
         response = recon_llm.invoke(messages)
-        summary = str(response.content).strip()
+        payload = _parse_json_response(str(response.content))
+        summary = json.dumps(payload, indent=2)
         cache_manager.set_contract_analysis(cache_key, {"recon_summary": summary})
         return {"recon_summary": summary}
 
@@ -487,27 +551,32 @@ def failure_analyzer_node(state: AuditGraphState) -> dict[str, Any]:
     if model.is_vulnerable:
         return {"failure_analysis": None}
 
-    logs = model.poc_execution_logs.lower()
-    category = "unknown"
-    summary = "Verification failed without a recognized signature."
-    guidance = "Reduce test scope and add deterministic preconditions."
+    logs = model.poc_execution_logs
+    category = "fix_needed"
+    summary = "Verification failed."
+    guidance = "Adjust harness setup and assertions."
 
-    if "compiler error" in logs or "parsererror" in logs or "declarationerror" in logs:
-        category = "compilation_error"
-        summary = "Verification test did not compile."
-        guidance = "Fix syntax and dependency imports first."
-    elif "assertion failed" in logs or "asserteq" in logs or "asserttrue" in logs:
-        category = "assertion_failure"
-        summary = "Execution completed but expected impact was not observed."
-        guidance = "Re-check invariant assumptions and actor setup."
-    elif "revert" in logs or "panic" in logs:
-        category = "revert"
-        summary = "Execution reverted during validation path."
-        guidance = "Confirm preconditions and role permissions."
-    elif "timeout" in logs:
-        category = "timeout"
-        summary = "Execution timed out."
-        guidance = "Constrain loops and reduce scenario complexity."
+    try:
+        messages: list[BaseMessage] = [
+            SystemMessage(content=FAILURE_ANALYZER_PROMPT),
+            HumanMessage(content=f"Hypothesis: {model.current_hypothesis}\nForge logs:\n{logs}"),
+        ]
+        response = auditor_llm.invoke(messages)
+        payload = _parse_json_response(str(response.content))
+        raw_category = str(payload.get("classification", category))
+        category = raw_category if raw_category in {"fix_needed", "false_positive", "env_error", "needs_fork"} else category
+        summary = str(payload.get("root_cause", summary))
+        guidance = str(payload.get("suggested_fix", guidance))
+    except Exception:
+        lowered = logs.lower()
+        if "compiler error" in lowered or "parsererror" in lowered or "declarationerror" in lowered:
+            category = "fix_needed"
+            summary = "Compilation failure in generated harness."
+            guidance = "Fix syntax and imports."
+        elif "timeout" in lowered:
+            category = "env_error"
+            summary = "Execution timeout."
+            guidance = "Retry with stable RPC or reduce test complexity."
 
     failure = FailureAnalysis(category=category, summary=summary, actionable_feedback=guidance)
     return {"failure_analysis": failure}
@@ -535,9 +604,32 @@ def economics_node(state: AuditGraphState) -> dict[str, Any]:
         ],
     )
     assessment = assess_exploit_economics(econ_input)
+    recommendation = "submit" if assessment.viable else "skip"
+    rationale = assessment.notes
+    try:
+        messages: list[BaseMessage] = [
+            SystemMessage(content=ECONOMICS_PROMPT),
+            HumanMessage(
+                content=(
+                    f"Hypothesis JSON:\n{hypothesis.model_dump_json()}\n"
+                    f"Forge success: {model.is_vulnerable}\n"
+                    f"Gas estimate units: {representative_gas}\n"
+                    "Platform bounty cap: null"
+                )
+            ),
+        ]
+        response = auditor_llm.invoke(messages)
+        payload = _parse_json_response(str(response.content))
+        candidate = str(payload.get("recommendation", recommendation)).lower()
+        if candidate in {"submit", "borderline", "skip"}:
+            recommendation = candidate
+        rationale = str(payload.get("recommendation_rationale", rationale))
+    except Exception:
+        pass
+
     return {
-        "economic_viable": assessment.viable,
-        "economic_notes": assessment.notes,
+        "economic_viable": recommendation in {"submit", "borderline"},
+        "economic_notes": rationale,
     }
 
 
@@ -566,25 +658,47 @@ def reviewer_node(state: AuditGraphState) -> dict[str, Any]:
         status = "NO_HIGH_CONFIDENCE_FINDING"
 
     report_bundle = generate_report_bundle(model)
-
-    report = (
-        f"# Bug Bounty Audit Report\n"
-        f"Started: {model.audit_started_at}\n"
-        f"Status: {status}\n"
-        f"Platform: {model.platform_name or 'unspecified'}\n\n"
-        f"## Duplicate Check\n"
-        f"Duplicate: {model.duplicate_report_exists}\n"
-        f"Reason: {model.duplicate_report_reason}\n\n"
-        f"## Triage\n"
-        f"Result: {model.triage_result}\n"
-        + "\n".join(f"- {reason}" for reason in model.triage_reasons)
-        + "\n\n"
-        f"## Recon Summary\n{model.recon_summary}\n\n"
-        f"## Economics\n"
-        f"Viable: {model.economic_viable}\n"
-        f"Notes: {model.economic_notes}\n\n"
-        f"## Summary\n{report_bundle['summary']}\n"
-    )
+    report = ""
+    platform_md = ""
+    report_json: dict[str, Any] = {}
+    try:
+        top_hyp = model.vulnerability_hypotheses[0].model_dump() if model.vulnerability_hypotheses else {}
+        messages: list[BaseMessage] = [
+            SystemMessage(content=REVIEWER_PROMPT),
+            HumanMessage(
+                content=(
+                    f"hypothesis={json.dumps(top_hyp)}\n"
+                    f"forge_logs={model.poc_execution_logs}\n"
+                    f"economics={{\"viable\": {str(model.economic_viable).lower()}, \"notes\": {json.dumps(model.economic_notes)} }}\n"
+                    f"platform={model.platform_name or 'immunefi'}"
+                )
+            ),
+        ]
+        response = auditor_llm.invoke(messages)
+        envelope = _parse_json_response(str(response.content))
+        report = str(envelope.get("report_md", "")).strip()
+        platform_md = str(envelope.get("platform_md", "")).strip()
+        report_json = envelope.get("report_json", {}) if isinstance(envelope.get("report_json", {}), dict) else {}
+    except Exception:
+        report = (
+            f"# Bug Bounty Audit Report\n"
+            f"Started: {model.audit_started_at}\n"
+            f"Status: {status}\n"
+            f"Platform: {model.platform_name or 'unspecified'}\n\n"
+            f"## Duplicate Check\n"
+            f"Duplicate: {model.duplicate_report_exists}\n"
+            f"Reason: {model.duplicate_report_reason}\n\n"
+            f"## Triage\n"
+            f"Result: {model.triage_result}\n"
+            + "\n".join(f"- {reason}" for reason in model.triage_reasons)
+            + "\n\n"
+            f"## Recon Summary\n{model.recon_summary}\n\n"
+            f"## Economics\n"
+            f"Viable: {model.economic_viable}\n"
+            f"Notes: {model.economic_notes}\n\n"
+            f"## Summary\n{report_bundle['summary']}\n"
+        )
+        platform_md = report_bundle["immunefi"] if (model.platform_name or "").lower() == "immunefi" else report_bundle["cantina"]
 
     report_dir = _ensure_report_dir(model)
     markdown_path = report_dir / "report.md"
@@ -604,12 +718,14 @@ def reviewer_node(state: AuditGraphState) -> dict[str, Any]:
         "forge_runs": [run.model_dump() for run in model.forge_runs],
         "gas_reports": [entry.model_dump() for entry in model.gas_reports],
         "report_markdown": report,
+        "platform_markdown": platform_md,
+        "report_json": report_json,
     }
 
     markdown_path.write_text(report, encoding="utf-8")
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    immunefi_path.write_text(report_bundle["immunefi"], encoding="utf-8")
-    cantina_path.write_text(report_bundle["cantina"], encoding="utf-8")
+    immunefi_path.write_text(platform_md if (model.platform_name or "").lower() == "immunefi" else report_bundle["immunefi"], encoding="utf-8")
+    cantina_path.write_text(platform_md if (model.platform_name or "").lower() == "cantina" else report_bundle["cantina"], encoding="utf-8")
 
     logger.info("Persisted report artifacts", extra={"context": {"report_dir": str(report_dir), "status": status}})
     return {"final_report": report, "report_directory": str(report_dir)}

@@ -4,96 +4,101 @@ LangGraph-based smart contract security assistant optimized for fast bug bounty 
 
 ## Safety Scope
 
-This project is designed for:
-- Defensive vulnerability discovery
-- Duplicate-checking against bounty platforms
-- Controlled reproducibility testing in local/forked environments
-- Report generation for responsible submission
+This project supports defensive work only:
+- vulnerability triage
+- duplicate-checking
+- controlled reproducibility harnesses
+- disclosure report drafting
 
-It is **not** intended to automate real-world exploitation.
+It is not intended for real-world exploit automation.
 
-## Core Workflow
-
-The graph keeps the core pipeline and adds speed gates:
+## Pipeline
 
 `harvester -> duplicate_guard -> triage -> recon -> auditor -> exploit -> failure_analyzer -> economics -> reviewer`
 
 Fast exits:
-- Duplicate found: skip deep run
-- Triage says low value: skip deep run in fast mode
+- duplicate signal -> reviewer
+- triage `skip` in fast mode -> reviewer
+
+## Prompt Contract (Important)
+
+`prompts.py` is JSON-first. Nodes should parse structured JSON, not free text.
+
+### Auditor hypothesis JSON fields
+- `title`
+- `description`
+- `vulnerability_type`: `reentrancy|overflow|access_control|oracle_manipulation|logic_error|flash_loan|front_running|other`
+- `severity`: `CRITICAL|HIGH|MEDIUM|LOW`
+- `affected_functions`: `string[]`
+- `funds_at_risk_usd`: `number|null`
+- `ease_of_exploitation`: `1..10`
+- `attack_preconditions`: `string[]`
+- `suggested_poc_approach`
+
+### Other prompt-driven envelopes
+- `triage`: `{ decision, rationale, confidence, signals[] }`
+- `failure_analyzer`: `{ classification, root_cause, suggested_fix, confidence }`
+- `economics`: `{ funds_at_risk_usd, estimated_bounty_usd, ... , recommendation }`
+- `reviewer`: `{ report_md, platform_md, report_json }`
 
 ## Key Features
 
-- Validated Anthropic model configuration (`claude-3-5-haiku-20241022`, `claude-3-5-sonnet-20241022`, `claude-3-opus-20240229`)
-- Triage-first routing for <10s signal checks
-- Platform duplicate checks for Immunefi, HackenProof, and Cantina
-- Parallel hypothesis testing with LangGraph fan-out
-- Economic viability scoring (`funds_at_risk_usd`, profitability assumptions)
-- Foundry execution with fork modes:
-  - `off`
-  - `mainnet` (Alchemy/Infura/env URL)
-  - `anvil` (local RPC)
+- Validated Anthropic model IDs:
+  - `claude-3-5-haiku-20241022`
+  - `claude-3-5-sonnet-20241022`
+  - `claude-3-opus-20240229`
+- Duplicate checks across Immunefi / HackenProof / Cantina (with fallback handling)
+- Triage-first routing and parallel hypothesis fan-out
+- Fork modes: `off`, `mainnet`, `anvil`
 - Optional Tenderly simulation helper
-- Structured report bundle output:
-  - `report.md`
-  - `report.json`
-  - `immunefi.md`
-  - `cantina.md`
-- SQLite caching for analysis/pattern/duplicate fingerprints
+- Economic viability scoring and recommendation
+- SQLite caching for prior analysis and duplicate fingerprints
+- Report bundle output (`report.md`, `report.json`, `immunefi.md`, `cantina.md`)
 
-## Project Structure
+## File Map
 
-- `main_agent.py`: LangGraph orchestration + routing logic
-- `config.py`: strict settings + validation
-- `tools.py`: Foundry execution, gas parsing, fork URL resolution, Tenderly helper
+- `main_agent.py`: graph orchestration + routing
+- `prompts.py`: authoritative node prompt contracts
+- `schemas.py`: vulnerability schema (uppercase severity + `attack_preconditions`)
+- `state.py`: typed graph state models
+- `tools.py`: Foundry execution + fork URL resolution + gas parsing
 - `bounty_platforms.py`: platform clients and duplicate checks
 - `exploit_economics.py`: viability calculations
-- `report_generator.py`: platform-oriented report templates
-- `contest_runner.py`: async batch triage and top-3 selection
+- `report_generator.py`: report template helpers
+- `contest_runner.py`: async batch triage/top-N selection
 - `cache_manager.py`: SQLite cache layer
-- `state.py`: Pydantic state models + typed graph state
-- `schemas.py`: vulnerability schema with risk/ease fields
-- `prompts.py`: defensive triage/audit/exploit-validation prompts
 
-## Requirements
-
-- Python 3.11+
-- Foundry (`forge`) on PATH
-- Anthropic API key
-
-Install:
+## Setup
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Environment Setup
-
-Copy the template:
-
-```bash
 cp .env.example .env
 ```
 
-(or Windows: `copy .env.example .env`)
+Windows copy command:
 
-Important vars:
+```powershell
+copy .env.example .env
+```
+
+## Required Environment Variables
+
 - `ANTHROPIC_API_KEY`
 - `RECON_MODEL`, `AUDIT_MODEL`, `EXPLOIT_MODEL`
-- `FAST_MODE`, `MAX_HYPOTHESES`, `MAX_PARALLEL_CONTRACTS`
-- `FORGE_MODE`, `FORGE_FORK_URL`, `ALCHEMY_MAINNET_URL`, `INFURA_MAINNET_URL`, `ANVIL_RPC_URL`
-- `IMMUNEFI_API_KEY`, `HACKENPROOF_API_KEY` (optional depending on endpoint access)
-- `TENDERLY_*` (optional)
+- `FORGE_MODE` + one of `FORGE_FORK_URL|ALCHEMY_MAINNET_URL|INFURA_MAINNET_URL` (for `mainnet` mode)
+- `ANVIL_RPC_URL` (for `anvil` mode)
 
-## Running
+Optional:
+- `IMMUNEFI_API_KEY`, `HACKENPROOF_API_KEY`
+- `TENDERLY_ENABLED`, `TENDERLY_ACCOUNT`, `TENDERLY_PROJECT`, `TENDERLY_ACCESS_KEY`
 
-Single run:
+## Run
 
 ```bash
 python main_agent.py
 ```
 
-Programmatic usage:
+Programmatic:
 
 ```python
 from main_agent import build_graph
@@ -105,31 +110,19 @@ result = graph.invoke(as_graph_state(state))
 print(result.get("report_directory"))
 ```
 
-## Contest Batch Triage
-
-Use `contest_runner.py` utilities to triage many targets in parallel (up to `MAX_PARALLEL_CONTRACTS`) and pick top candidates for deeper analysis.
-
 ## Testing
-
-Run:
 
 ```bash
 pytest -q
 ```
 
-Current suite includes:
-- schema validation
-- tool execution behavior
-- utility/state checks
-- exploit economics calculations
+## Outputs
 
-## Output Artifacts
-
-Reports are saved under:
+Reports are written to:
 
 `./reports/{timestamp}_{contract_name}/`
 
-With:
+Artifacts:
 - `report.md`
 - `report.json`
 - `immunefi.md`
