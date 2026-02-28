@@ -8,11 +8,11 @@ from state import AuditState
 
 
 def _severity_to_label(severity: Severity) -> str:
-    if severity == Severity.critical:
+    if severity == Severity.CRITICAL:
         return "Critical"
-    if severity == Severity.high:
+    if severity == Severity.HIGH:
         return "High"
-    if severity == Severity.medium:
+    if severity == Severity.MEDIUM:
         return "Medium"
     return "Low"
 

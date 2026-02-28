@@ -11,14 +11,15 @@ class VulnerabilityType(str, Enum):
     logic_error = "logic_error"
     oracle_manipulation = "oracle_manipulation"
     flash_loan = "flash_loan"
+    front_running = "front_running"
     other = "other"
 
 
 class Severity(str, Enum):
-    critical = "critical"
-    high = "high"
-    medium = "medium"
-    low = "low"
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
 
 
 class VulnerabilityHypothesis(BaseModel):
@@ -30,6 +31,7 @@ class VulnerabilityHypothesis(BaseModel):
     suggested_poc_approach: str
     funds_at_risk_usd: float = Field(default=0.0, ge=0.0)
     ease_of_exploitation: int = Field(default=5, ge=1, le=10)
+    attack_preconditions: List[str] = Field(default_factory=list)
 
     @field_validator("funds_at_risk_usd")
     @classmethod

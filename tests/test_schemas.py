@@ -22,7 +22,7 @@ def test_invalid_type_rejected():
             title="Test",
             description="description",
             vulnerability_type="alien",
-            severity="high",
+            severity="HIGH",
             affected_functions=["foo"],
             suggested_poc_approach="Run flash loan",
         )
