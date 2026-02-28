@@ -1,5 +1,9 @@
+requests
+pydantic-settings
 langchain
 langchain-core
-langgraph
 langchain-anthropic
+langgraph
 python-dotenv
+pytest
+pytest-mock
