@@ -1,26 +1,116 @@
-from typing import TypedDict, List, Dict
+from __future__ import annotations
+
+import operator
+from datetime import datetime, timezone
+from typing import Annotated, Any, Optional, TypedDict
+
+from pydantic import BaseModel, Field, field_validator
 
 from schemas import VulnerabilityHypothesis
 
 
-class FoundryRun(TypedDict):
+class FoundryRun(BaseModel):
     hypothesis: str
-    exit_code: int | None
-    stdout_snippet: str
+    round_index: int = 0
+    exit_code: Optional[int] = None
+    stdout_snippet: str = ""
+    stderr_snippet: str = ""
+    success: bool = False
+    duration_seconds: float = 0.0
+
+
+class GasReport(BaseModel):
+    hypothesis: str
+    round_index: int = 0
+    test_name: str
+    gas_used: int
+
+
+class FailureAnalysis(BaseModel):
+    category: str = "unknown"
+    summary: str = ""
+    actionable_feedback: str = ""
+
+
+class ExploitAttemptResult(BaseModel):
+    hypothesis: str
+    round_index: int = 0
     success: bool
+    foundry_poc_code: str
+    poc_execution_logs: str
+    failure_analysis: Optional[FailureAnalysis] = None
+    run: FoundryRun
+    gas_reports: list[GasReport] = Field(default_factory=list)
 
 
-class AuditState(TypedDict):
-    raw_code: str
+class AuditState(BaseModel):
+    raw_code: Optional[str] = None
+    working_raw_code: Optional[str] = None
+    recon_summary: str = ""
+    vulnerability_hypotheses: list[VulnerabilityHypothesis] = Field(default_factory=list)
+    current_hypothesis: Optional[str] = None
+    hypotheses_batch: list[str] = Field(default_factory=list)
+    foundry_poc_code: str = ""
+    poc_execution_logs: str = ""
+    is_vulnerable: bool = False
+    retry_count: int = 0
+    final_report: str = ""
+    hypothesis_history: list[str] = Field(default_factory=list)
+    node_errors: dict[str, list[str]] = Field(default_factory=dict)
+    audit_started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    contract_address: Optional[str] = None
+    contract_chain: str = "mainnet"
+    contract_name: Optional[str] = None
+    failure_analysis: Optional[FailureAnalysis] = None
+    forge_runs: list[FoundryRun] = Field(default_factory=list)
+    gas_reports: list[GasReport] = Field(default_factory=list)
+    exploit_attempt_results: list[ExploitAttemptResult] = Field(default_factory=list)
+    report_directory: Optional[str] = None
+
+    @field_validator("retry_count")
+    @classmethod
+    def validate_retry_count(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("retry_count must be >= 0")
+        return value
+
+
+class AuditGraphState(TypedDict, total=False):
+    raw_code: Optional[str]
+    working_raw_code: Optional[str]
     recon_summary: str
-    vulnerability_hypotheses: List[VulnerabilityHypothesis]
-    current_hypothesis: str
+    vulnerability_hypotheses: list[VulnerabilityHypothesis]
+    current_hypothesis: Optional[str]
+    hypotheses_batch: list[str]
     foundry_poc_code: str
     poc_execution_logs: str
     is_vulnerable: bool
     retry_count: int
     final_report: str
-    hypothesis_history: List[str]
-    node_errors: Dict[str, List[str]]
+    hypothesis_history: list[str]
+    node_errors: dict[str, list[str]]
     audit_started_at: str
-    forge_runs: List[FoundryRun]
+    contract_address: Optional[str]
+    contract_chain: str
+    contract_name: Optional[str]
+    failure_analysis: Optional[FailureAnalysis]
+    forge_runs: Annotated[list[FoundryRun], operator.add]
+    gas_reports: Annotated[list[GasReport], operator.add]
+    exploit_attempt_results: Annotated[list[ExploitAttemptResult], operator.add]
+    report_directory: Optional[str]
+
+
+def build_initial_state(raw_code: Optional[str] = None, contract_address: Optional[str] = None) -> AuditState:
+    return AuditState(
+        raw_code=raw_code,
+        working_raw_code=raw_code,
+        contract_address=contract_address,
+    )
+
+
+def as_graph_state(state: AuditState) -> AuditGraphState:
+    return state.model_dump()
+
+
+def validate_graph_state(state: dict[str, Any]) -> AuditState:
+    return AuditState.model_validate(state)
