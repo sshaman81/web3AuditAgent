@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
+import requests
 from langchain.tools import tool
 
 
@@ -24,6 +26,15 @@ class GasUsage(TypedDict):
     gas_used: int
 
 
+class TenderlyResult(TypedDict):
+    success: bool
+    status_code: int
+    simulation_id: str
+    gas_used: int
+    state_diff: dict[str, Any]
+    raw: dict[str, Any]
+
+
 def _truncate_end(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
@@ -35,7 +46,30 @@ def _ensure_within_sandbox(path: Path, sandbox_root: Path) -> None:
         raise ValueError(f"Refusing to write outside sandbox: {path}")
 
 
-def _build_forge_command(fork_url: Optional[str]) -> list[str]:
+def resolve_fork_url(
+    explicit_fork_url: Optional[str] = None,
+    mode: str = "off",
+    anvil_rpc_url: Optional[str] = None,
+) -> Optional[str]:
+    if mode == "off":
+        return None
+    if mode == "anvil":
+        url = (anvil_rpc_url or os.getenv("ANVIL_RPC_URL") or "http://127.0.0.1:8545").strip()
+        return url
+
+    if explicit_fork_url and explicit_fork_url.strip():
+        return explicit_fork_url.strip()
+
+    for env_name in ("FORGE_FORK_URL", "ALCHEMY_MAINNET_URL", "INFURA_MAINNET_URL"):
+        value = os.getenv(env_name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _build_forge_command(
+    fork_url: Optional[str],
+) -> list[str]:
     cmd = ["forge", "test", "--match-path", "test/AgentExploit.t.sol", "-vvvv"]
     if fork_url:
         cmd.extend(["--fork-url", fork_url])
@@ -50,7 +84,6 @@ def extract_gas_usage(stdout: str) -> list[GasUsage]:
     ]
 
     for line in stdout.splitlines():
-        matched = False
         for pattern in patterns:
             match = pattern.search(line)
             if not match:
@@ -62,12 +95,53 @@ def extract_gas_usage(stdout: str) -> list[GasUsage]:
                 test_name = "unknown_test"
                 gas_value = int(match.group(1).replace("_", ""))
             gas_entries.append(GasUsage(test_name=test_name, gas_used=gas_value))
-            matched = True
             break
-        if matched:
-            continue
 
     return gas_entries
+
+
+def simulate_with_tenderly(
+    network_id: str,
+    from_address: str,
+    to_address: str,
+    input_data: str,
+    value: str = "0x0",
+    gas: int = 8_000_000,
+) -> TenderlyResult:
+    account = os.getenv("TENDERLY_ACCOUNT")
+    project = os.getenv("TENDERLY_PROJECT")
+    access_key = os.getenv("TENDERLY_ACCESS_KEY")
+    if not all([account, project, access_key]):
+        raise RuntimeError("Tenderly credentials are missing")
+
+    url = f"https://api.tenderly.co/api/v1/account/{account}/project/{project}/simulate"
+    payload = {
+        "network_id": network_id,
+        "from": from_address,
+        "to": to_address,
+        "input": input_data,
+        "value": value,
+        "gas": gas,
+        "save": False,
+        "save_if_fails": True,
+    }
+    headers = {
+        "X-Access-Key": access_key,
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, json=payload, headers=headers, timeout=30)
+    body = response.json() if response.content else {}
+    sim = body.get("simulation", {}) if isinstance(body, dict) else {}
+
+    return TenderlyResult(
+        success=response.ok,
+        status_code=response.status_code,
+        simulation_id=str(sim.get("id", "")),
+        gas_used=int(sim.get("gas_used", 0) or 0),
+        state_diff=sim.get("state_diff", {}) if isinstance(sim, dict) else {},
+        raw=body if isinstance(body, dict) else {},
+    )
 
 
 @tool("execute_foundry_poc")
@@ -77,6 +151,8 @@ def execute_foundry_poc(
     max_chars: int,
     fork_url: Optional[str] = None,
     sandbox_dir: str = "foundry_sandbox",
+    fork_mode: str = "off",
+    anvil_rpc_url: Optional[str] = None,
 ) -> FoundryResult:
     """Execute Solidity PoC test code via forge test in a constrained sandbox path."""
     if timeout_seconds <= 0:
@@ -101,7 +177,13 @@ def execute_foundry_poc(
     _ensure_within_sandbox(test_file, sandbox_path)
     test_file.write_text(solidity_code, encoding="utf-8")
 
-    cmd = _build_forge_command(fork_url=fork_url)
+    resolved_fork_url = resolve_fork_url(
+        explicit_fork_url=fork_url,
+        mode=fork_mode,
+        anvil_rpc_url=anvil_rpc_url,
+    )
+
+    cmd = _build_forge_command(fork_url=resolved_fork_url)
 
     start = time.monotonic()
     try:

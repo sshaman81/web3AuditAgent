@@ -1,12 +1,21 @@
-RECON_PROMPT = "Analyze the provided Solidity contract and summarize the protocol architecture, key modules, and notable state variables or access controls that influence the threat surface."
-AUDITOR_PROMPT = (
-    "Review the recon summary and raw contract code, finding High or Critical logic flaws. "
-    "Return a JSON object that matches the VulnerabilityHypothesis schema: "
-    "title, description, vulnerability_type (reentrancy|overflow|access_control|logic_error|oracle_manipulation|other), "
-    "severity (critical|high|medium|low), affected_functions, suggested_poc_approach."
+RECON_PROMPT = (
+    "Analyze the provided Solidity contract for defensive security review. "
+    "Summarize architecture, trust boundaries, privileged roles, and high-risk flows."
 )
+
+AUDITOR_PROMPT = (
+    "Review recon notes and contract code for HIGH or CRITICAL vulnerabilities only. "
+    "Focus on reentrancy, flash-loan-sensitive logic, oracle trust assumptions, and access control failures. "
+    "Return JSON matching VulnerabilityHypothesis schema, including funds_at_risk_usd and ease_of_exploitation (1-10)."
+)
+
 EXPLOIT_DEV_PROMPT = (
-    "Using forge-std/Test.sol and Foundry cheatcodes, draft a Solidity Foundry test that proves the provided hypothesis. "
-    "Minimize setup, execute the exploit, emit asserts, and keep the System Prompt + Raw Code + Hypothesis at the beginning of the conversation to benefit from Anthropic caching. "
-    "Only append new terminal error traces after those static components."
+    "Produce a defensive reproducibility test plan in Foundry style that validates whether the hypothesis is real. "
+    "Use deterministic setup, explicit token amounts, and clear before/after assertions. "
+    "Do not provide real-world attack playbooks; provide a controlled verification harness for responsible disclosure only."
+)
+
+TRIAGE_PROMPT = (
+    "Perform fast triage in under 10 seconds. Classify as promising or skip based on obvious high-value bug signals. "
+    "Return concise rationale emphasizing exploitability and potential impact."
 )

@@ -61,11 +61,20 @@ class AuditState(BaseModel):
     contract_address: Optional[str] = None
     contract_chain: str = "mainnet"
     contract_name: Optional[str] = None
+    platform_name: Optional[str] = None
+    duplicate_report_exists: bool = False
+    duplicate_report_reason: str = ""
+    triage_result: str = "pending"
+    triage_reasons: list[str] = Field(default_factory=list)
+    skip_recon: bool = False
     failure_analysis: Optional[FailureAnalysis] = None
     forge_runs: list[FoundryRun] = Field(default_factory=list)
     gas_reports: list[GasReport] = Field(default_factory=list)
     exploit_attempt_results: list[ExploitAttemptResult] = Field(default_factory=list)
     report_directory: Optional[str] = None
+    funds_at_risk_usd: float = 0.0
+    economic_viable: bool = False
+    economic_notes: str = ""
 
     @field_validator("retry_count")
     @classmethod
@@ -93,18 +102,32 @@ class AuditGraphState(TypedDict, total=False):
     contract_address: Optional[str]
     contract_chain: str
     contract_name: Optional[str]
+    platform_name: Optional[str]
+    duplicate_report_exists: bool
+    duplicate_report_reason: str
+    triage_result: str
+    triage_reasons: list[str]
+    skip_recon: bool
     failure_analysis: Optional[FailureAnalysis]
     forge_runs: Annotated[list[FoundryRun], operator.add]
     gas_reports: Annotated[list[GasReport], operator.add]
     exploit_attempt_results: Annotated[list[ExploitAttemptResult], operator.add]
     report_directory: Optional[str]
+    funds_at_risk_usd: float
+    economic_viable: bool
+    economic_notes: str
 
 
-def build_initial_state(raw_code: Optional[str] = None, contract_address: Optional[str] = None) -> AuditState:
+def build_initial_state(
+    raw_code: Optional[str] = None,
+    contract_address: Optional[str] = None,
+    platform_name: Optional[str] = None,
+) -> AuditState:
     return AuditState(
         raw_code=raw_code,
         working_raw_code=raw_code,
         contract_address=contract_address,
+        platform_name=platform_name,
     )
 
 
