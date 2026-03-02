@@ -3,11 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools import execute_foundry_poc
+from web3audit.tools import execute_foundry_poc
 
 
 def _stub_forge(monkeypatch):
-    monkeypatch.setattr("tools.shutil.which", lambda _: "/usr/bin/forge")
+    monkeypatch.setattr("web3audit.tools.shutil.which", lambda _: "/usr/bin/forge")
 
 
 def test_execute_foundry_poc_success(monkeypatch):
@@ -16,7 +16,7 @@ def test_execute_foundry_poc_success(monkeypatch):
     def fake_run(*args, **kwargs):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
-    monkeypatch.setattr("tools.subprocess.run", fake_run)
+    monkeypatch.setattr("web3audit.tools.subprocess.run", fake_run)
     result = execute_foundry_poc.func("contract Foo {}", timeout_seconds=1, max_chars=20)
     assert result["success"]
     assert result["exit_code"] == 0
@@ -30,7 +30,7 @@ def test_execute_foundry_poc_failure_truncation(monkeypatch):
     def fake_run(*args, **kwargs):
         return SimpleNamespace(returncode=1, stdout="X" * 128, stderr="ERR")
 
-    monkeypatch.setattr("tools.subprocess.run", fake_run)
+    monkeypatch.setattr("web3audit.tools.subprocess.run", fake_run)
     result = execute_foundry_poc.func("contract Foo {}", timeout_seconds=1, max_chars=10)
     assert not result["success"]
     assert result["exit_code"] == 1
@@ -49,7 +49,7 @@ def test_execute_foundry_poc_timeout(monkeypatch):
             stderr="timeout",
         )
 
-    monkeypatch.setattr("tools.subprocess.run", fake_run)
+    monkeypatch.setattr("web3audit.tools.subprocess.run", fake_run)
     result = execute_foundry_poc.func("contract Foo {}", timeout_seconds=1, max_chars=20)
     assert not result["success"]
     assert result["exit_code"] is None

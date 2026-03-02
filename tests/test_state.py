@@ -1,4 +1,4 @@
-from utils import word_overlap
+from web3audit.utils import word_overlap
 
 
 def test_word_overlap_high_similarity():

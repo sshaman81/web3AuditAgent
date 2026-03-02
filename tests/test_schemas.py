@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from schemas import VulnerabilityHypothesis
+from web3audit.schemas import VulnerabilityHypothesis
 
 
 def test_invalid_severity_rejected():

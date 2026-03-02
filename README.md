@@ -1,129 +1,142 @@
-# web3AuditAgent (Bug Bounty Assistant, Defensive Mode)
+# web3AuditAgent — Defensive Bug Bounty Assistant
 
-LangGraph-based smart contract security assistant optimized for fast bug bounty triage and responsible disclosure workflows.
+LangGraph-based smart contract security assistant tuned for confident triage, duplicate detection, reproducible PoCs, and structured disclosure drafts. It is intentionally defensive — no exploit automation.
 
-## Safety Scope
+## Overview
 
-This project supports defensive work only:
-- vulnerability triage
-- duplicate-checking
-- controlled reproducibility harnesses
-- disclosure report drafting
+- **Zero surprise**: prompts and nodes only speak JSON, so downstream routing stays deterministic.
+- **LLM agnostic**: supported Anthropic/Claude models plus Codex/OpenAI options via `LLM_PROVIDER`.
+- **Evidence-rich**: includes past comparison/precision bugs from [EVM Research](https://evmresearch.io/index) and caches LLM replies to minimize cost.
+- **Language-safe**: all prompts rehydrate through LangChain/Anthropic or LangChain/OpenAI wrappers with a shared memory bank and circuit-breaker middleware.
 
-It is not intended for real-world exploit automation.
+## Quick Start
 
-## Pipeline
+1. Install dependencies:
 
-`harvester -> duplicate_guard -> triage -> recon -> auditor -> exploit -> failure_analyzer -> economics -> reviewer`
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-Fast exits:
-- duplicate signal -> reviewer
-- triage `skip` in fast mode -> reviewer
+2. Copy the environment template:
 
-## Prompt Contract (Important)
+    ```bash
+    cp .env.example .env
+    ```
 
-`prompts.py` is JSON-first. Nodes should parse structured JSON, not free text.
+    On Windows (PowerShell):
 
-### Auditor hypothesis JSON fields
-- `title`
-- `description`
-- `vulnerability_type`: `reentrancy|overflow|access_control|oracle_manipulation|logic_error|flash_loan|front_running|other`
-- `severity`: `CRITICAL|HIGH|MEDIUM|LOW`
-- `affected_functions`: `string[]`
-- `funds_at_risk_usd`: `number|null`
-- `ease_of_exploitation`: `1..10`
-- `attack_preconditions`: `string[]`
-- `suggested_poc_approach`
+    ```powershell
+    copy .env.example .env
+    ```
 
-### Other prompt-driven envelopes
-- `triage`: `{ decision, rationale, confidence, signals[] }`
-- `failure_analyzer`: `{ classification, root_cause, suggested_fix, confidence }`
-- `economics`: `{ funds_at_risk_usd, estimated_bounty_usd, ... , recommendation }`
-- `reviewer`: `{ report_md, platform_md, report_json }`
+3. Fill the required API keys (Anthropic or OpenAI) and model IDs.
 
-## Key Features
+## Project Layout
 
-- Validated Anthropic model IDs:
-  - `claude-3-5-haiku-20241022`
-  - `claude-3-5-sonnet-20241022`
-  - `claude-3-opus-20240229`
-- Duplicate checks across Immunefi / HackenProof / Cantina (with fallback handling)
-- Triage-first routing and parallel hypothesis fan-out
-- Fork modes: `off`, `mainnet`, `anvil`
-- Optional Tenderly simulation helper
-- Economic viability scoring and recommendation
-- SQLite caching for prior analysis and duplicate fingerprints
-- Report bundle output (`report.md`, `report.json`, `immunefi.md`, `cantina.md`)
+- `src/web3audit/` — packaged agent logic (nodes, prompts, cache, platform clients, helpers). Import it via `from web3audit import ...`.
+- `tests/` — pytest suite now imports through `web3audit.*`.
+- `reports/` — runtime artifact directory (`report.md`, `report.json`, `immunefi.md`, `cantina.md` per run).
+- `main_agent.py` — legacy wrapper that prepends `src` to `sys.path` and gates `python main_agent.py`.
 
-## File Map
+## Architecture
 
-- `main_agent.py`: graph orchestration + routing
-- `prompts.py`: authoritative node prompt contracts
-- `schemas.py`: vulnerability schema (uppercase severity + `attack_preconditions`)
-- `state.py`: typed graph state models
-- `tools.py`: Foundry execution + fork URL resolution + gas parsing
-- `bounty_platforms.py`: platform clients and duplicate checks
-- `exploit_economics.py`: viability calculations
-- `report_generator.py`: report template helpers
-- `contest_runner.py`: async batch triage/top-N selection
-- `cache_manager.py`: SQLite cache layer
+1. **Graph orchestration** (`StateGraph` pipeline) runs: harvester → duplicate guard → triage → recon → auditor → exploit → failure analysis → economics → reviewer.
+2. **LLM wrappers** use `_build_llm()` to instantiate Anthropic or OpenAI clients and `_invoke_llm_cached()` to consult the memory bank before invoking.
+3. **Cache layer** (SQLite) stores recon summaries, duplicate fingerprints, and LLM responses (`CacheManager` in `src/web3audit/cache_manager.py`).
+4. **EVM Research context** optionally appends curated comparison-bug links to recon/auditor prompts.
 
-## Setup
+## Environment Variables
+
+### Required
+
+- `LLM_PROVIDER`: `anthropic` or `openai`.
+- `ANTHROPIC_API_KEY` *or* `OPENAI_API_KEY` depending on provider.
+- `RECON_MODEL`, `AUDIT_MODEL`, `EXPLOIT_MODEL` set to the model IDs you want to run (Claude IDs are enforced while `LLM_PROVIDER=anthropic`).
+
+### Optional but recommended
+
+- `OPENAI_BASE_URL`: for Codex gateways/proxies.
+- `EVMRESEARCH_ENABLED`, `EVMRESEARCH_INDEX_URL`, `EVMRESEARCH_TIMEOUT_SECONDS`, `EVMRESEARCH_MAX_REFS`: control the historical comparison-bug feed.
+- `MEMORY_BANK_ENABLED`, `MEMORY_BANK_VERSION`: toggle and version the LLM memory cache.
+- `FORGE_MODE`, `FORGE_FORK_URL`, `ALCHEMY_MAINNET_URL`, `INFURA_MAINNET_URL`, `ANVIL_RPC_URL`: configure Foundry forks.
+- `TARGET_CONTEXT_FILE`: path to a reusable context file produced by `scripts/prepare_target_context.py`.
+
+## Target context cache
+
+1. Clone or copy the Solidity target repository somewhere (for example `targets/my-target/`).
+2. Run `python scripts/prepare_target_context.py targets/my-target --main contracts/Main.sol --output targets/my-target/context.txt`.
+   This bundles the README plus every `.sol` file into `context.txt`.
+3. Point the agent to it:
+
+   ```
+   TARGET_CONTEXT_FILE=/full/path/targets/my-target/context.txt PYTHONPATH=src python -m web3audit.main_agent
+   ```
+- `IMMUNEFI_API_KEY`, `HACKENPROOF_API_KEY`, `TENDERLY_*`: optional platform integrations.
+
+## Running
+
+### Preferred
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env
+PYTHONPATH=src python -m web3audit.main_agent
 ```
 
-Windows copy command:
-
-```powershell
-copy .env.example .env
-```
-
-## Required Environment Variables
-
-- `ANTHROPIC_API_KEY`
-- `RECON_MODEL`, `AUDIT_MODEL`, `EXPLOIT_MODEL`
-- `FORGE_MODE` + one of `FORGE_FORK_URL|ALCHEMY_MAINNET_URL|INFURA_MAINNET_URL` (for `mainnet` mode)
-- `ANVIL_RPC_URL` (for `anvil` mode)
-
-Optional:
-- `IMMUNEFI_API_KEY`, `HACKENPROOF_API_KEY`
-- `TENDERLY_ENABLED`, `TENDERLY_ACCOUNT`, `TENDERLY_PROJECT`, `TENDERLY_ACCESS_KEY`
-
-## Run
+### Legacy-compatible
 
 ```bash
 python main_agent.py
 ```
 
-Programmatic:
+`main_agent.py` monkey-patches `sys.path` so the legacy entrypoint resolves even without `PYTHONPATH`.
+
+## Programmatic Usage
 
 ```python
-from main_agent import build_graph
-from state import build_initial_state, as_graph_state
+from web3audit.main_agent import build_graph
+from web3audit.state import build_initial_state, as_graph_state
 
 graph = build_graph()
-state = build_initial_state(raw_code="contract Sample { function run() public {} }", platform_name="immunefi")
+state = build_initial_state(
+    raw_code="contract Sample { function run() public {} }",
+    platform_name="immunefi",
+)
 result = graph.invoke(as_graph_state(state))
-print(result.get("report_directory"))
+print(result["report_directory"])
 ```
 
 ## Testing
 
 ```bash
-pytest -q
+PYTHONPATH=src pytest -q
 ```
 
 ## Outputs
 
-Reports are written to:
+Results live under:
 
-`./reports/{timestamp}_{contract_name}/`
+```text
+./reports/{timestamp}_{contract_name}/
+```
 
-Artifacts:
-- `report.md`
-- `report.json`
-- `immunefi.md`
-- `cantina.md`
+Artifacts per run:
+
+- `report.md`: final markdown narrative.
+- `report.json`: structured audit payload.
+- `immunefi.md` / `cantina.md`: platform-specific drafts.
+
+## Troubleshooting & Tips
+
+- **Memory collisions**: bump `MEMORY_BANK_VERSION` when you change prompt wording to force LLM cache invalidation.
+- **Slow recon**: check `CACHE_DB_PATH` (default `./audit_cache.sqlite3`) to reuse previous summaries.
+- **Failed forks**: ensure `ANVIL_RPC_URL` or valid mainnet fork URLs are reachable when `FORGE_MODE=anvil/mainnet`.
+- **LLM failures**: the circuit-breaker middleware logs per-node failures in structured JSON via the `pythonjsonlogger` formatter.
+
+## Contribution & Tracking
+
+- Keep tests green (`PYTHONPATH=src pytest -q`) before merging.
+- Add new prompt contracts under `src/web3audit/prompts.py` and document schema changes in README.
+- For new nodes add targeted tests in `tests/` and update `tests/test_evmresearch.py` or `tests/test_cache_manager.py` as needed.
+
+## License
+
+No license yet. Add `LICENSE` if you plan to publish this repository publicly.
